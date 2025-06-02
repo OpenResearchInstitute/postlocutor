@@ -218,7 +218,7 @@ class OpulentVoiceReceiver:
                 print(f":clipboard: Control: {message}")
         elif frame_type == OpulentVoiceProtocol.FRAME_TYPE_TEXT:
             text_message = payload.decode('utf-8', errors='ignore')
-            print(replace_colons(f":speech_balloon: Text frame #{sequence}: {text_message}"))
+            print(replace_colons(f":speech_balloon: {text_message}"))
         else:
             print(replace_colons(f":question: Unknown frame type: {frame_type}"))
     def listen_loop(self):
