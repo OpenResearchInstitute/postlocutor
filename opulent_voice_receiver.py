@@ -34,25 +34,26 @@ except ImportError:
     sys.exit(1)
 class OpulentVoiceProtocol:
     """Opulent Voice Protocol Parser"""
-    MAGIC_BYTES = b'\x4F\x56'  # "OV"
+    MAGIC_BYTES = b'\xFF\x5D'  # Sync Word taken from M17
     FRAME_TYPE_AUDIO = 0x01
     FRAME_TYPE_TEXT = 0x02
     FRAME_TYPE_CONTROL = 0x03
     FRAME_TYPE_DATA = 0x04
-    HEADER_SIZE = 8
+    HEADER_SIZE = 14
     @staticmethod
     def parse_frame(frame_data):
         """Parse received Opulent Voice frame"""
         if len(frame_data) < OpulentVoiceProtocol.HEADER_SIZE:
             return None
         try:
-            magic, frame_type, sequence, payload_len, reserved = struct.unpack(
-                '>2s B H H B', frame_data[:OpulentVoiceProtocol.HEADER_SIZE]
+            magic, station_id, frame_type, sequence, payload_len, reserved = struct.unpack(
+                '>2s 6s B H H B', frame_data[:OpulentVoiceProtocol.HEADER_SIZE]
             )
             if magic != OpulentVoiceProtocol.MAGIC_BYTES:
                 return None
             payload = frame_data[OpulentVoiceProtocol.HEADER_SIZE:OpulentVoiceProtocol.HEADER_SIZE + payload_len]
             return {
+                'station_id': station_id,
                 'type': frame_type,
                 'sequence': sequence,
                 'payload': payload,
