@@ -39,6 +39,14 @@ except ImportError:
     print("✗ emoji-data-python missing. Install with:")
     print("  pip3 install emoji-data-python")
     sys.exit(1)
+try:
+    from callsign_encode import decode_callsign
+    print("✓ callsign_encode ready")
+except ImportError:
+    print("✗ callsign_encode missing. Install with:")
+    print("  pip3 install callsign-encode")
+    sys.exit(1)
+
 class OpulentVoiceProtocol:
     """Opulent Voice Protocol Parser"""
     MAGIC_BYTES = b'\xFF\x5D'  # Sync Word taken from M17
@@ -56,6 +64,8 @@ class OpulentVoiceProtocol:
             magic, station_id, frame_type, sequence, payload_len, reserved = struct.unpack(
                 '>2s 6s B H H B', frame_data[:OpulentVoiceProtocol.HEADER_SIZE]
             )
+            station_id = int.from_bytes(station_id, 'big')
+
             if magic != OpulentVoiceProtocol.MAGIC_BYTES:
                 return None
             payload = frame_data[OpulentVoiceProtocol.HEADER_SIZE:OpulentVoiceProtocol.HEADER_SIZE + payload_len]
@@ -215,10 +225,10 @@ class OpulentVoiceReceiver:
                 self.ptt_active = False
                 print(replace_colons(f":mute: PTT STOP from {sender_addr[0]}"))
             else:
-                print(f":clipboard: Control: {message}")
+                print(replace_colons(":clipboard:") + f" Control: {message}")
         elif frame_type == OpulentVoiceProtocol.FRAME_TYPE_TEXT:
             text_message = payload.decode('utf-8', errors='ignore')
-            print(replace_colons(f":speech_balloon: {text_message}"))
+            print(decode_callsign(parsed_frame['station_id']) + replace_colons(f":speech_balloon: {text_message}"))
         else:
             print(replace_colons(f":question: Unknown frame type: {frame_type}"))
     def listen_loop(self):
