@@ -117,7 +117,7 @@ class AudioPlayer:
         """Decode OPUS packet and queue for playback"""
         try:
             # Decode OPUS to PCM
-            pcm_audio = self.decoder.decode(opus_packet, decode_fec=False)
+            pcm_audio = self.decoder.decode(opus_packet, 1920, decode_fec=False)
             self.stats['frames_decoded'] += 1
             # Add to playback queue
             if self.audio_queue.full():
