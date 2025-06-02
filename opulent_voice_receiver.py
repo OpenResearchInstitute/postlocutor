@@ -291,10 +291,6 @@ if __name__ == "__main__":
         last_status = time.time()
         while True:
             time.sleep(1)
-            # Print status every 10 seconds
-            if time.time() - last_status > 10:
-                receiver.print_status()
-                last_status = time.time()
     except KeyboardInterrupt:
         print(replace_colons("\n:bar_chart: Final Statistics:"))
         receiver.print_status()
