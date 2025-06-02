@@ -32,6 +32,13 @@ except ImportError:
     print("  Linux: sudo apt install python3-pyaudio")
     print("  Windows: pip3 install pyaudio")
     sys.exit(1)
+try:
+    from emoji_data_python import replace_colons
+    print("✓ emoji-data-python ready")
+except ImportError:
+    print("✗ emoji-data-python missing. Install with:")
+    print("  pip3 install emoji-data-python")
+    sys.exit(1)
 class OpulentVoiceProtocol:
     """Opulent Voice Protocol Parser"""
     MAGIC_BYTES = b'\xFF\x5D'  # Sync Word taken from M17
@@ -85,7 +92,7 @@ class AudioPlayer:
         try:
             # Find default output device
             default_output = self.audio.get_default_output_device_info()
-            print(f":loud_sound: Audio output: {default_output['name']}")
+            print(replace_colons(f":loud_sound: Audio output: {default_output['name']}"))
             self.output_stream = self.audio.open(
                 format=pyaudio.paInt16,
                 channels=self.channels,
@@ -137,7 +144,7 @@ class AudioPlayer:
         if self.output_stream:
             self.output_stream.start_stream()
             self.running = True
-            print(":musical_note: Audio playback started")
+            print(replace_colons(":musical_note: Audio playback started"))
     def stop(self):
         """Stop audio playback"""
         self.running = False
@@ -145,7 +152,7 @@ class AudioPlayer:
             self.output_stream.stop_stream()
             self.output_stream.close()
         self.audio.terminate()
-        print(":octagonal_sign: Audio playback stopped")
+        print(replace_colons(":octagonal_sign: Audio playback stopped"))
     def get_stats(self):
         """Get playback statistics"""
         return self.stats.copy()
@@ -178,7 +185,7 @@ class OpulentVoiceReceiver:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.bind((self.listen_ip, self.listen_port))
-            print(f":globe_with_meridians: Listening on {self.listen_ip}:{self.listen_port}")
+            print(replace_colons(f":globe_with_meridians: Listening on {self.listen_ip}:{self.listen_port}"))
         except Exception as e:
             print(f"✗ Socket setup error: {e}")
             raise
@@ -197,23 +204,26 @@ class OpulentVoiceReceiver:
             self.last_audio_time = time.time()
             # Decode and play audio
             self.audio_player.decode_and_queue_audio(payload)
-            print(f":musical_note: Audio frame #{sequence}: {len(payload)} bytes OPUS")
+            print(replace_colons(f":musical_note: Audio frame #{sequence}: {len(payload)} bytes OPUS"))
         elif frame_type == OpulentVoiceProtocol.FRAME_TYPE_CONTROL:
             self.stats['control_frames'] += 1
             message = payload.decode('utf-8', errors='ignore')
             if message == "PTT_START":
                 self.ptt_active = True
-                print(f":microphone: PTT START from {sender_addr[0]}")
+                print(replace_colons(f":microphone: PTT START from {sender_addr[0]}"))
             elif message == "PTT_STOP":
                 self.ptt_active = False
-                print(f":mute: PTT STOP from {sender_addr[0]}")
+                print(replace_colons(f":mute: PTT STOP from {sender_addr[0]}"))
             else:
                 print(f":clipboard: Control: {message}")
+        elif frame_type == OpulentVoiceProtocol.FRAME_TYPE_TEXT:
+            text_message = payload.decode('utf-8', errors='ignore')
+            print(replace_colons(f":speech_balloon: Text frame #{sequence}: {text_message}"))
         else:
-            print(f":question: Unknown frame type: {frame_type}")
+            print(replace_colons(f":question: Unknown frame type: {frame_type}"))
     def listen_loop(self):
         """Main listening loop"""
-        print(":ear: Listening for Opulent Voice packets...")
+        print(replace_colons(":ear: Listening for Opulent Voice packets..."))
         while self.running:
             try:
                 # Receive packet
@@ -231,7 +241,7 @@ class OpulentVoiceReceiver:
         """Print current status"""
         now = datetime.now().strftime("%H:%M:%S")
         audio_stats = self.audio_player.get_stats()
-        print(f"\n:bar_chart: Status at {now}:")
+        print(replace_colons(f"\n:bar_chart: Status at {now}:"))
         print(f"   Packets received: {self.stats['packets_received']}")
         print(f"   Valid frames: {self.stats['valid_frames']}")
         print(f"   Audio frames: {self.stats['audio_frames']}")
@@ -251,32 +261,32 @@ class OpulentVoiceReceiver:
         self.listen_thread = threading.Thread(target=self.listen_loop)
         self.listen_thread.daemon = True
         self.listen_thread.start()
-        print(":rocket: Opulent Voice Receiver started")
-        print(":bulb: Speak into the microphone on the transmitter!")
+        print(replace_colons(":rocket: Opulent Voice Receiver started"))
     def stop(self):
         """Stop the receiver"""
         self.running = False
         self.audio_player.stop()
         if self.socket:
             self.socket.close()
-        print(":octagonal_sign: Receiver stopped")
+        print(replace_colons(":octagonal_sign: Receiver stopped"))
 
 # Main execution
 if __name__ == "__main__":
+
     print("=" * 50)
-    print(":studio_microphone: Opulent Voice Receiver")
+    print(replace_colons(":studio_microphone: Opulent Voice Receiver"))
     print("=" * 50)
     # Configuration
     LISTEN_PORT = 8080
-    print(f":satellite_antenna: Will listen on port {LISTEN_PORT}")
-    print(":loud_sound: Make sure your speakers/headphones are connected!")
+    print(replace_colons(f":satellite_antenna: Will listen on port {LISTEN_PORT}"))
+    print(replace_colons(":loud_sound: Make sure your speakers/headphones are connected!"))
     print()
     try:
         # Create and start receiver
         receiver = OpulentVoiceReceiver(listen_port=LISTEN_PORT)
         receiver.start()
-        print("\n:white_check_mark: Receiver ready! Waiting for transmissions...")
-        print(":bar_chart: Press Ctrl+C to show stats and exit")
+        print(replace_colons("\n:white_check_mark: Receiver ready! Waiting for transmissions..."))
+        print(replace_colons(":bar_chart: Press Ctrl+C to show stats and exit"))
         # Status updates every 10 seconds
         last_status = time.time()
         while True:
@@ -286,9 +296,9 @@ if __name__ == "__main__":
                 receiver.print_status()
                 last_status = time.time()
     except KeyboardInterrupt:
-        print("\n:bar_chart: Final Statistics:")
+        print(replace_colons("\n:bar_chart: Final Statistics:"))
         receiver.print_status()
-        print("\n:wave: Thanks for using Opulent Voice Receiver!")
+        print(replace_colons("\n:wave: Thanks for using Opulent Voice Receiver!"))
     except Exception as e:
         print(f"✗ Error: {e}")
     finally:
