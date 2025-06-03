@@ -54,19 +54,23 @@ class OpulentVoiceProtocol:
     FRAME_TYPE_TEXT = 0x02
     FRAME_TYPE_CONTROL = 0x03
     FRAME_TYPE_DATA = 0x04
-    HEADER_SIZE = 14
+    DUMMY_TOKEN_VALUE = 0xBBAADD
+    HEADER_SIZE = 17  # Magic (2) + Station ID (6) + Type (1) + Sequence (2) + Payload Length (2) + Reserved (1)
     @staticmethod
     def parse_frame(frame_data):
         """Parse received Opulent Voice frame"""
         if len(frame_data) < OpulentVoiceProtocol.HEADER_SIZE:
             return None
         try:
-            magic, station_id, frame_type, sequence, payload_len, reserved = struct.unpack(
-                '>2s 6s B H H B', frame_data[:OpulentVoiceProtocol.HEADER_SIZE]
+            magic, station_id, frame_type, sequence, payload_len, token, reserved = struct.unpack(
+                '>2s 6s B H H 3s B', frame_data[:OpulentVoiceProtocol.HEADER_SIZE]
             )
             station_id = int.from_bytes(station_id, 'big')
+            token = int.from_bytes(token, 'big')
 
             if magic != OpulentVoiceProtocol.MAGIC_BYTES:
+                return None
+            if token != OpulentVoiceProtocol.DUMMY_TOKEN_VALUE:
                 return None
             payload = frame_data[OpulentVoiceProtocol.HEADER_SIZE:OpulentVoiceProtocol.HEADER_SIZE + payload_len]
             return {
@@ -214,7 +218,8 @@ class OpulentVoiceReceiver:
             self.last_audio_time = time.time()
             # Decode and play audio
             self.audio_player.decode_and_queue_audio(payload)
-            print(replace_colons(f":musical_note: Audio frame #{sequence}: {len(payload)} bytes OPUS"))
+            print("🎤", end="", flush=True)
+            # print(replace_colons(f":musical_note: Audio frame #{sequence}: {len(payload)} bytes OPUS"))
         elif frame_type == OpulentVoiceProtocol.FRAME_TYPE_CONTROL:
             self.stats['control_frames'] += 1
             message = payload.decode('utf-8', errors='ignore')
@@ -223,7 +228,7 @@ class OpulentVoiceReceiver:
                 print(replace_colons(f":microphone: PTT START from {sender_addr[0]}"))
             elif message == "PTT_STOP":
                 self.ptt_active = False
-                print(replace_colons(f":mute: PTT STOP from {sender_addr[0]}"))
+                print(replace_colons(f"\n:mute: PTT STOP from {sender_addr[0]}"))
             else:
                 print(replace_colons(":clipboard:") + f" Control: {message}")
         elif frame_type == OpulentVoiceProtocol.FRAME_TYPE_TEXT:
