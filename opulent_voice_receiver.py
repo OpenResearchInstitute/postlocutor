@@ -198,7 +198,7 @@ class OpulentVoiceReceiver:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.bind((self.listen_ip, self.listen_port))
-            print(replace_colons(f":globe_with_meridians: Listening on {self.listen_ip}:{self.listen_port}"))
+            # print(replace_colons(f":globe_with_meridians: Listening on {self.listen_ip}:{self.listen_port}"))
         except Exception as e:
             print(f"✗ Socket setup error: {e}")
             raise
@@ -215,7 +215,7 @@ class OpulentVoiceReceiver:
             self.stats['audio_frames'] += 1
             self.last_audio_time = time.time()
             # Decode and play audio
-            self.audio_player.decode_and_queue_audio(payload)
+            self.audio_player.decode_and_queue_audio(payload[12:])
             print("🎤", end="", flush=True)
             # print(replace_colons(f":musical_note: Opus Audio frame"))
         elif frame_type == OpulentVoiceProtocol.FRAME_TYPE_CONTROL:
