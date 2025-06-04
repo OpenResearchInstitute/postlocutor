@@ -56,6 +56,15 @@ class OpulentVoiceProtocol:
     FRAME_TYPE_DATA = 0x04
     DUMMY_TOKEN_VALUE = 0xBBAADD
     HEADER_SIZE = 13  # Magic (2) + Station ID (6) + Type (1) + Reserved (1)
+
+    opus_frame_size_bytes = 80  # bytes in an encoded 40ms Opus frame (including a TOC byte)
+    opus_packet_size_bytes = opus_frame_size_bytes  # exactly one frame per packet
+    rtp_header_bytes = 12   # per RFC3550
+    udp_header_bytes = 8    # per RFC768
+    ip_v4_header_bytes = 20 # per RFC791 (IPv4 only)
+    cobs_overhead_bytes_for_opus = 2    # max of 1 byte COBS (since Opus packet < 254 byte) plus a 0 separator
+    total_protocol_bytes = rtp_header_bytes + udp_header_bytes + ip_v4_header_bytes + cobs_overhead_bytes_for_opus
+
     @staticmethod
     def parse_frame(frame_data):
         """Parse received Opulent Voice frame"""
@@ -192,6 +201,10 @@ class OpulentVoiceReceiver:
         self.ptt_active = False
         self.last_audio_time = 0
         self.setup_socket()
+        self.last_rtp_seq = None
+        self.last_rtp_timestamp = None
+        self.last_rtp_ssrc = None
+
     def setup_socket(self):
         """Setup UDP listening socket"""
         try:
@@ -202,6 +215,62 @@ class OpulentVoiceReceiver:
         except Exception as e:
             print(f"✗ Socket setup error: {e}")
             raise
+    
+    def process_RTP(self, rtp_header):
+        """Process RTP header"""
+        if len(rtp_header) < OpulentVoiceProtocol.rtp_header_bytes:
+            print("✗ RTP header too short")
+            return
+        # Extract RTP fields
+        version = (rtp_header[0] >> 6) & 0x03
+        if version != 2:
+            print(f"✗ Unsupported RTP version: {version}")
+            return
+        # Check for padding and extension
+        padding = (rtp_header[0] >> 5) & 0x01
+        if padding:
+            print("✗ RTP padding not supported")
+            return
+        extension = (rtp_header[0] >> 4) & 0x01
+        if extension:
+            print("✗ RTP extension not supported")
+            return
+        cc = rtp_header[0] & 0x0F
+        if cc > 0:
+            print(f"✗ RTP CSRC count {cc} not supported")
+            return
+        # Extract other fields
+        marker = (rtp_header[1] >> 7) & 0x01
+        if marker:
+            print(replace_colons(":round_pushpin:"), end="", flush=True)
+
+        payload_type = rtp_header[1] & 0x7F
+        if payload_type != 96:
+            print(f"✗ Unsupported RTP payload type: {payload_type}")
+            return
+        
+        seq_number = struct.unpack('>H', rtp_header[2:4])[0]
+        if self.last_rtp_seq is None:
+            print(f"RTP sequence number started at {seq_number}")
+        elif seq_number != (self.last_rtp_seq + 1) % 65536:
+            print(f"✗ RTP sequence number mismatch: expected {self.last_rtp_seq + 1}, got {seq_number}")
+        self.last_rtp_seq = seq_number
+
+        timestamp = struct.unpack('>I', rtp_header[4:8])[0]
+        if self.last_rtp_timestamp is None:
+            print(f"RTP timestamp started at {timestamp}")
+        elif timestamp != self.last_rtp_timestamp + 1920:
+            print(f"✗ RTP timestamp mismatch: expected {self.last_rtp_timestamp + 1920}, got {timestamp}")
+        self.last_rtp_timestamp = timestamp
+
+        ssrc = struct.unpack('>I', rtp_header[8:12])[0]
+        if self.last_rtp_ssrc is None:
+            print(f"RTP SSRC started at {ssrc}")
+        elif ssrc != self.last_rtp_ssrc:
+            print(f"RTP SSRC changed to {ssrc}")
+        self.last_rtp_ssrc = ssrc
+
+        #print(f"RTP Version: {version}, Padding: {padding}, Extension: {extension}, CC: {cc}, Marker: {marker}, Payload Type: {payload_type}, Seq Number: {seq_number}, Timestamp: {timestamp}, SSRC: {ssrc}")  
     def process_frame(self, frame_data, sender_addr):
         """Process received Opulent Voice frame"""
         parsed_frame = self.protocol.parse_frame(frame_data)
@@ -214,8 +283,9 @@ class OpulentVoiceReceiver:
         if frame_type == OpulentVoiceProtocol.FRAME_TYPE_AUDIO:
             self.stats['audio_frames'] += 1
             self.last_audio_time = time.time()
+            self.process_RTP(payload[:OpulentVoiceProtocol.rtp_header_bytes])
             # Decode and play audio
-            self.audio_player.decode_and_queue_audio(payload[12:])
+            self.audio_player.decode_and_queue_audio(payload[OpulentVoiceProtocol.rtp_header_bytes:])
             print("🎤", end="", flush=True)
             # print(replace_colons(f":musical_note: Opus Audio frame"))
         elif frame_type == OpulentVoiceProtocol.FRAME_TYPE_CONTROL:
