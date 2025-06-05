@@ -55,7 +55,7 @@ class OpulentVoiceProtocol:
     FRAME_TYPE_CONTROL = 0x03
     FRAME_TYPE_DATA = 0x04
     DUMMY_TOKEN_VALUE = 0xBBAADD
-    HEADER_SIZE = 13  # Magic (2) + Station ID (6) + Type (1) + Reserved (1)
+    HEADER_SIZE = 13  # Magic (2) + Station ID (6) + Type (1) + Token (3) +  Reserved (1)
 
     opus_frame_size_bytes = 80  # bytes in an encoded 40ms Opus frame (including a TOC byte)
     opus_packet_size_bytes = opus_frame_size_bytes  # exactly one frame per packet
@@ -270,7 +270,20 @@ class OpulentVoiceReceiver:
             print(f"RTP SSRC changed to {ssrc}")
         self.last_rtp_ssrc = ssrc
 
-        #print(f"RTP Version: {version}, Padding: {padding}, Extension: {extension}, CC: {cc}, Marker: {marker}, Payload Type: {payload_type}, Seq Number: {seq_number}, Timestamp: {timestamp}, SSRC: {ssrc}")  
+    def process_UDP(self, udp_packet):
+        """Process UDP header"""
+        if len(udp_packet) < OpulentVoiceProtocol.udp_header_bytes:
+            print("✗ UDP header too short")
+            return
+        # parse UDP header
+        src_port, dst_port, udp_length, udp_checksum = struct.unpack('>HHHH', udp_packet[:OpulentVoiceProtocol.udp_header_bytes])
+        # !!! process src_port and dst_port if needed
+        # check length
+        if udp_length != len(udp_packet):
+            print(f"✗ UDP length mismatch: packet size was {len(udp_packet)} but header said {udp_length}")
+            return
+        # !!! check checksum if needed
+
     def process_frame(self, frame_data, sender_addr):
         """Process received Opulent Voice frame"""
         parsed_frame = self.protocol.parse_frame(frame_data)
@@ -283,13 +296,15 @@ class OpulentVoiceReceiver:
         if frame_type == OpulentVoiceProtocol.FRAME_TYPE_AUDIO:
             self.stats['audio_frames'] += 1
             self.last_audio_time = time.time()
-            self.process_RTP(payload[:OpulentVoiceProtocol.rtp_header_bytes])
+            self.process_UDP(payload)
+            self.process_RTP(payload[OpulentVoiceProtocol.udp_header_bytes:OpulentVoiceProtocol.udp_header_bytes+OpulentVoiceProtocol.rtp_header_bytes])
             # Decode and play audio
-            self.audio_player.decode_and_queue_audio(payload[OpulentVoiceProtocol.rtp_header_bytes:])
+            self.audio_player.decode_and_queue_audio(payload[OpulentVoiceProtocol.udp_header_bytes+OpulentVoiceProtocol.rtp_header_bytes:])
             print("🎤", end="", flush=True)
             # print(replace_colons(f":musical_note: Opus Audio frame"))
         elif frame_type == OpulentVoiceProtocol.FRAME_TYPE_CONTROL:
             self.stats['control_frames'] += 1
+            payload = payload[OpulentVoiceProtocol.udp_header_bytes:]
             message = payload.decode('utf-8', errors='ignore')
             if message == "PTT_START":
                 self.ptt_active = True
@@ -300,6 +315,7 @@ class OpulentVoiceReceiver:
             else:
                 print(replace_colons(":clipboard:") + f" Control: {message}")
         elif frame_type == OpulentVoiceProtocol.FRAME_TYPE_TEXT:
+            payload = payload[OpulentVoiceProtocol.udp_header_bytes:]
             text_message = payload.decode('utf-8', errors='ignore')
             print(decode_callsign(parsed_frame['station_id']) + replace_colons(f":speech_balloon: {text_message}"))
         else:
