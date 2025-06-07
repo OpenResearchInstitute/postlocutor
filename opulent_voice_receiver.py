@@ -21,7 +21,7 @@ from datetime import datetime
 import opuslib
 import pyaudio
 from emoji_data_python import replace_colons
-from scapy.all import *  # !!! be more selective in this import
+from scapy.all import IP, UDP
 
 # local imports
 from callsign_encode import decode_callsign
