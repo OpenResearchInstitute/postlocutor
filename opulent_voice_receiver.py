@@ -46,6 +46,14 @@ except ImportError:
     print("✗ callsign_encode missing. Install with:")
     print("  pip3 install callsign-encode")
     sys.exit(1)
+try:
+    from scapy.all import *
+    print("✓ scapy ready")
+except ImportError:
+    print("✗ scapy missing. Install with:")
+    print("  pip3 install scapy")
+    sys.exit(1)
+
 
 class OpulentVoiceProtocol:
     """Opulent Voice Protocol Parser"""
@@ -293,18 +301,38 @@ class OpulentVoiceReceiver:
         self.stats['valid_frames'] += 1
         frame_type = parsed_frame['type']
         payload = parsed_frame['payload']
+
+        # entering the world of Scapy
+        pkt = IP(payload)
+        original_ip_checksum = pkt[IP].chksum
+        print(f"original_ip_checksum: {original_ip_checksum}")
+        if UDP in pkt:
+            original_udp_checksum = pkt[UDP].chksum
+            print(f"original_udp_checksum: {original_udp_checksum}")
+        del pkt[IP].chksum  # Remove original checksum
+        pkt = pkt.__class__(bytes(pkt)) # Rebuild the packet, recalculating checksum
+        print(f"Calculated IP checksum: {pkt[IP].chksum}")
+        if original_ip_checksum != pkt[IP].chksum:  
+            print(f"✗ IP checksum mismatch: received {original_ip_checksum}, calculated {pkt[IP].chksum}")
+        if UDP in pkt:
+            del pkt[UDP].chksum  # Remove original checksum 
+            pkt = pkt.__class__(bytes(pkt)) # Rebuild the packet, recalculating checksum
+            print(f"Calculated UDP checksum: {pkt[UDP].chksum}")
+            if original_udp_checksum != pkt[UDP].chksum:
+                print(f"✗ UDP checksum mismatch: received {original_udp_checksum}, calculated {pkt[UDP].chksum}")
+
         if frame_type == OpulentVoiceProtocol.FRAME_TYPE_AUDIO:
             self.stats['audio_frames'] += 1
             self.last_audio_time = time.time()
-            self.process_UDP(payload)
-            self.process_RTP(payload[OpulentVoiceProtocol.udp_header_bytes:OpulentVoiceProtocol.udp_header_bytes+OpulentVoiceProtocol.rtp_header_bytes])
+            self.process_UDP(payload[OpulentVoiceProtocol.ip_v4_header_bytes:])
+            self.process_RTP(payload[OpulentVoiceProtocol.ip_v4_header_bytes + OpulentVoiceProtocol.udp_header_bytes:OpulentVoiceProtocol.ip_v4_header_bytes + OpulentVoiceProtocol.udp_header_bytes+OpulentVoiceProtocol.rtp_header_bytes])
             # Decode and play audio
-            self.audio_player.decode_and_queue_audio(payload[OpulentVoiceProtocol.udp_header_bytes+OpulentVoiceProtocol.rtp_header_bytes:])
+            self.audio_player.decode_and_queue_audio(payload[OpulentVoiceProtocol.ip_v4_header_bytes + OpulentVoiceProtocol.udp_header_bytes+OpulentVoiceProtocol.rtp_header_bytes:])
             print("🎤", end="", flush=True)
             # print(replace_colons(f":musical_note: Opus Audio frame"))
         elif frame_type == OpulentVoiceProtocol.FRAME_TYPE_CONTROL:
             self.stats['control_frames'] += 1
-            payload = payload[OpulentVoiceProtocol.udp_header_bytes:]
+            payload = payload[OpulentVoiceProtocol.ip_v4_header_bytes + OpulentVoiceProtocol.udp_header_bytes:]
             message = payload.decode('utf-8', errors='ignore')
             if message == "PTT_START":
                 self.ptt_active = True
@@ -315,7 +343,7 @@ class OpulentVoiceReceiver:
             else:
                 print(replace_colons(":clipboard:") + f" Control: {message}")
         elif frame_type == OpulentVoiceProtocol.FRAME_TYPE_TEXT:
-            payload = payload[OpulentVoiceProtocol.udp_header_bytes:]
+            payload = payload[OpulentVoiceProtocol.ip_v4_header_bytes + OpulentVoiceProtocol.udp_header_bytes:]
             text_message = payload.decode('utf-8', errors='ignore')
             print(decode_callsign(parsed_frame['station_id']) + replace_colons(f":speech_balloon: {text_message}"))
         else:
