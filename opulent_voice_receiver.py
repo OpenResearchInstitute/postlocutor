@@ -303,8 +303,7 @@ class OpulentVoiceReceiver:
             print(
                 f"✗ UDP length mismatch: packet size was {len(udp_packet)} but header said {udp_length}"
             )
-            return
-        # !!! check checksum if needed
+        return dst_port
 
     def process_frame(self, frame_data, sender_addr):
         """Process received Opulent Voice frame"""
@@ -340,7 +339,12 @@ class OpulentVoiceReceiver:
         if frame_type == OpulentVoiceProtocol.FRAME_TYPE_AUDIO:
             self.stats["audio_frames"] += 1
             self.last_audio_time = time.time()
-            self.process_UDP(payload[OpulentVoiceProtocol.ip_v4_header_bytes :])
+            udp_port = self.process_UDP(payload[OpulentVoiceProtocol.ip_v4_header_bytes :])
+            if udp_port != OPV_VOICE_UDP_PORT:
+                print(
+                    f"✗ Unexpected UDP port: expected {OPV_VOICE_UDP_PORT}, got {udp_port}"
+                )
+                return
             self.process_RTP(
                 payload[
                     OpulentVoiceProtocol.ip_v4_header_bytes
@@ -361,6 +365,13 @@ class OpulentVoiceReceiver:
             # print(replace_colons(f":musical_note: Opus Audio frame"))
         elif frame_type == OpulentVoiceProtocol.FRAME_TYPE_CONTROL:
             self.stats["control_frames"] += 1
+            udp_port = self.process_UDP(payload[OpulentVoiceProtocol.ip_v4_header_bytes :])
+            if udp_port != OPV_CONTROL_UDP_PORT:
+                print(
+                    f"✗ Unexpected UDP port: expected {OPV_CONTROL_UDP_PORT}, got {udp_port}"
+                )
+                return
+
             payload = payload[
                 OpulentVoiceProtocol.ip_v4_header_bytes
                 + OpulentVoiceProtocol.udp_header_bytes :
@@ -375,6 +386,13 @@ class OpulentVoiceReceiver:
             else:
                 print(replace_colons(":clipboard:") + f" Control: {message}")
         elif frame_type == OpulentVoiceProtocol.FRAME_TYPE_TEXT:
+            udp_port = self.process_UDP(payload[OpulentVoiceProtocol.ip_v4_header_bytes :])
+            if udp_port != OPV_TEXT_UDP_PORT:
+                print(
+                    f"✗ Unexpected UDP port: expected {OPV_TEXT_UDP_PORT}, got {udp_port}"
+                )
+                return
+
             payload = payload[
                 OpulentVoiceProtocol.ip_v4_header_bytes
                 + OpulentVoiceProtocol.udp_header_bytes :
