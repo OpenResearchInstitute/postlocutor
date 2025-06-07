@@ -35,10 +35,9 @@ OPV_CONTROL_UDP_PORT = 57375  # Opulent Voice control port (AAAAA, etc.)
 class OpulentVoiceProtocol:
     """Opulent Voice Protocol Parser"""
 
-    MAGIC_BYTES = b"\xff\x5d"  # Sync Word taken from M17 !!! Move to modem layer
     DUMMY_TOKEN_VALUE = 0xBBAADD  # Dummy for authentication token
     HEADER_SIZE = (  # !!! Must eventually be a multiple of 3 bytes for Golay coding
-        13  # Magic (2) + Station ID (6) + Type (1) + Token (3) +  Reserved (1)
+        12  # Station ID (6) + Token (3) +  Reserved (3)
     )
 
     opus_frame_size_bytes = (
@@ -65,14 +64,12 @@ class OpulentVoiceProtocol:
         if len(frame_data) < OpulentVoiceProtocol.HEADER_SIZE:
             return None
         try:
-            magic, station_id, frame_type, token, reserved = struct.unpack(
-                ">2s 6s B 3s B", frame_data[: OpulentVoiceProtocol.HEADER_SIZE]
+            station_id, token, reserved = struct.unpack(
+                ">6s 3s 3s", frame_data[: OpulentVoiceProtocol.HEADER_SIZE]
             )
             station_id = int.from_bytes(station_id, "big")
             token = int.from_bytes(token, "big")
 
-            if magic != OpulentVoiceProtocol.MAGIC_BYTES:
-                return None
             if token != OpulentVoiceProtocol.DUMMY_TOKEN_VALUE:
                 return None
             payload = frame_data[OpulentVoiceProtocol.HEADER_SIZE :]
