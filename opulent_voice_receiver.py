@@ -16,20 +16,17 @@ import socket
 import struct
 import threading
 import time
+import traceback
 from datetime import datetime
 
 import opuslib
 import pyaudio
+from cobs import cobs
 from emoji_data_python import replace_colons
 from scapy.all import IP, UDP
 
 # local imports
 from callsign_encode import decode_callsign
-
-OPV_ENCAP_UDP_PORT = 57372  # Opulent Voice encapsulation port, never sent over the air
-OPV_VOICE_UDP_PORT = 57373  # Opulent Voice Opus voice port
-OPV_TEXT_UDP_PORT = 57374  # Opulent Voice text port
-OPV_CONTROL_UDP_PORT = 57375  # Opulent Voice control port (AAAAA, etc.)
 
 
 class OpulentVoiceProtocol:
@@ -40,46 +37,55 @@ class OpulentVoiceProtocol:
         12  # Station ID (6) + Token (3) +  Reserved (3)
     )
 
+    # Known IP/UDP ports for Opulent Voice
+    OPV_ENCAP_UDP_PORT = 57372  # Opulent Voice encapsulation port (not OTA)
+    OPV_VOICE_UDP_PORT = 57373  # Opulent Voice Opus voice port
+    OPV_TEXT_UDP_PORT = 57374  # Opulent Voice text port
+    OPV_CONTROL_UDP_PORT = 57375  # Opulent Voice control port (AAAAA, etc.)
+
     opus_frame_size_bytes = (
         80  # bytes in an encoded 40ms Opus frame (including a TOC byte)
     )
     opus_packet_size_bytes = opus_frame_size_bytes  # exactly one frame per packet
-    rtp_header_bytes = 12  # per RFC3550
-    udp_header_bytes = 8  # per RFC768
+    rtp_header_bytes = 12  # per RFC3550 (no CSRC, no extension, no padding)
+    udp_header_bytes = 8  # per RFC768 (fixed size)
     ip_v4_header_bytes = 20  # per RFC791 (IPv4 only, minimal header without options)
     cobs_overhead_bytes_for_opus = (
         2  # max of 1 byte COBS (since Opus packet < 254 byte) plus a 0 separator
     )
-    total_protocol_bytes = (
+    total_protocol_bytes_for_opus = (
         rtp_header_bytes
         + udp_header_bytes
         + ip_v4_header_bytes
         + cobs_overhead_bytes_for_opus
     )
 
-    # !!! break this up into COBS processing and packet processing
     @staticmethod
     def parse_frame(frame_data):
         """Parse received Opulent Voice frame"""
-        if len(frame_data) < OpulentVoiceProtocol.HEADER_SIZE:
+        if len(frame_data) < OPVP.HEADER_SIZE:
             return None
         try:
             station_id, token, reserved = struct.unpack(
-                ">6s 3s 3s", frame_data[: OpulentVoiceProtocol.HEADER_SIZE]
+                ">6s 3s 3s", frame_data[: OPVP.HEADER_SIZE]
             )
             station_id = int.from_bytes(station_id, "big")
             token = int.from_bytes(token, "big")
 
-            if token != OpulentVoiceProtocol.DUMMY_TOKEN_VALUE:
+            if token != OPVP.DUMMY_TOKEN_VALUE:
                 return None
-            payload = frame_data[OpulentVoiceProtocol.HEADER_SIZE :]
+            payload = frame_data[OPVP.HEADER_SIZE :]
             return {
                 "station_id": station_id,
                 "payload": payload,
+                "token": token,
                 "timestamp": time.time(),
             }
         except struct.error:
             return None
+
+
+OPVP = OpulentVoiceProtocol  # abbreviation for convenience
 
 
 class AudioPlayer:
@@ -90,7 +96,7 @@ class AudioPlayer:
         self.channels = channels
         self.audio = pyaudio.PyAudio()
         self.output_stream = None
-        self.audio_queue = queue.Queue(maxsize=50)  # Buffer up to 50 frames
+        self.audio_queue = queue.Queue(maxsize=5)  # Buffer up to 5 frames
         self.running = False
         # OPUS decoder
         self.decoder = opuslib.Decoder(fs=sample_rate, channels=channels)
@@ -186,7 +192,7 @@ class AudioPlayer:
 class OpulentVoiceReceiver:
     """Main receiver class"""
 
-    def __init__(self, listen_ip="0.0.0.0", listen_port=OPV_ENCAP_UDP_PORT):
+    def __init__(self, listen_ip="0.0.0.0", listen_port=OPVP.OPV_ENCAP_UDP_PORT):
         self.listen_ip = listen_ip
         self.listen_port = listen_port
         self.socket = None
@@ -204,12 +210,12 @@ class OpulentVoiceReceiver:
             "bytes_received": 0,
         }
         # PTT state tracking
-        self.ptt_active = False
         self.last_audio_time = 0
         self.setup_socket()
         self.last_rtp_seq = None
         self.last_rtp_timestamp = None
         self.last_rtp_ssrc = None
+        self.cobs_reassembly_buffer = b""
 
     def setup_socket(self):
         """Setup UDP listening socket"""
@@ -224,7 +230,7 @@ class OpulentVoiceReceiver:
 
     def process_RTP(self, rtp_header):
         """Process RTP header"""
-        if len(rtp_header) < OpulentVoiceProtocol.rtp_header_bytes:
+        if len(rtp_header) < OPVP.rtp_header_bytes:
             print("✗ RTP header too short")
             return
         # Extract RTP fields
@@ -256,12 +262,11 @@ class OpulentVoiceReceiver:
             return
 
         seq_number = struct.unpack(">H", rtp_header[2:4])[0]
-        if self.last_rtp_seq is None:
-            print(f"RTP sequence number started at {seq_number}")
-        elif seq_number != (self.last_rtp_seq + 1) % 65536:
-            print(
-                f"✗ RTP sequence number mismatch: expected {self.last_rtp_seq + 1}, got {seq_number}"
-            )
+        if (
+            self.last_rtp_seq is not None
+            and seq_number != (self.last_rtp_seq + 1) % 65536
+        ):
+            print("RTP sequence restarted")
         self.last_rtp_seq = seq_number
 
         timestamp = struct.unpack(">I", rtp_header[4:8])[0]
@@ -282,19 +287,19 @@ class OpulentVoiceReceiver:
 
     def process_UDP(self, udp_packet):
         """Process UDP header"""
-        if len(udp_packet) < OpulentVoiceProtocol.udp_header_bytes:
+        if len(udp_packet) < OPVP.udp_header_bytes:
             print("✗ UDP header too short")
             return
         # parse UDP header
         src_port, dst_port, udp_length, udp_checksum = struct.unpack(
-            ">HHHH", udp_packet[: OpulentVoiceProtocol.udp_header_bytes]
+            ">HHHH", udp_packet[: OPVP.udp_header_bytes]
         )
         # !!! process src_port and dst_port if needed
         # check length
-        if udp_length != len(udp_packet):
-            print(
-                f"✗ UDP length mismatch: packet size was {len(udp_packet)} but header said {udp_length}"
-            )
+        # if udp_length != len(udp_packet):
+        #    print(
+        #        f"✗ UDP length mismatch: packet size was {len(udp_packet)} but header said {udp_length}"
+        #   )
         return dst_port
 
     def process_frame(self, frame_data, sender_addr):
@@ -304,10 +309,38 @@ class OpulentVoiceReceiver:
             self.stats["invalid_frames"] += 1
             return
         self.stats["valid_frames"] += 1
-        payload = parsed_frame["payload"]
+        # payload = parsed_frame["payload"]
+        self.cobs_process_bytes(parsed_frame)
 
-        # entering the world of Scapy
+    def cobs_process_bytes(self, parsed_frame):
+        """Process COBS-encoded bytes found in received frame"""
+        payload = parsed_frame["payload"]
+        zero_index = payload.find(b"\x00")  # zero indicates end of COBS packet
+        if zero_index == -1:  # no zero; accumulate all the data for COBS packet
+            self.cobs_reassembly_buffer += payload
+            return  # done processing to the end of the frame
+        else:
+            # end of COBS packet found
+            self.cobs_reassembly_buffer += payload[:zero_index]
+            sender_id = parsed_frame["station_id"]
+            self.process_COBS_packet(self.cobs_reassembly_buffer, sender_id)
+            self.cobs_reassembly_buffer = b""  # reset buffer for next COBS packet
+            if len(payload) > zero_index + 1:
+                # there is more data after the zero byte
+                parsed_frame["payload"] = payload[
+                    zero_index + 1 :
+                ]  # skip the zero byte
+                self.cobs_process_bytes(
+                    parsed_frame
+                )  # recursive call to process next part
+
+    def process_COBS_packet(self, encoded_payload, sender_id):
+        """Process COBS-encoded packet"""
+        payload = cobs.decode(encoded_payload)  # decode COBS packet
+
+        # entering the world of Scapy in the received packet
         pkt = IP(payload)
+        # print(pkt.show())
         original_ip_checksum = pkt[IP].chksum
         if UDP in pkt:
             original_udp_checksum = pkt[UDP].chksum
@@ -328,56 +361,52 @@ class OpulentVoiceReceiver:
                 )
                 return
             udp_port = pkt[UDP].dport
-            if udp_port == OPV_VOICE_UDP_PORT:
+            if udp_port == OPVP.OPV_VOICE_UDP_PORT:
                 self.stats["audio_frames"] += 1
                 self.last_audio_time = time.time()
-                self.process_UDP(payload[OpulentVoiceProtocol.ip_v4_header_bytes :])
+                self.process_UDP(payload[OPVP.ip_v4_header_bytes :])
                 self.process_RTP(
                     payload[
-                        OpulentVoiceProtocol.ip_v4_header_bytes
-                        + OpulentVoiceProtocol.udp_header_bytes : OpulentVoiceProtocol.ip_v4_header_bytes
-                        + OpulentVoiceProtocol.udp_header_bytes
-                        + OpulentVoiceProtocol.rtp_header_bytes
+                        OPVP.ip_v4_header_bytes
+                        + OPVP.udp_header_bytes : OPVP.ip_v4_header_bytes
+                        + OPVP.udp_header_bytes
+                        + OPVP.rtp_header_bytes
                     ]
                 )
                 # Decode and play audio
                 self.audio_player.decode_and_queue_audio(
                     payload[
-                        OpulentVoiceProtocol.ip_v4_header_bytes
-                        + OpulentVoiceProtocol.udp_header_bytes
-                        + OpulentVoiceProtocol.rtp_header_bytes :
+                        OPVP.ip_v4_header_bytes
+                        + OPVP.udp_header_bytes
+                        + OPVP.rtp_header_bytes :
                     ]
                 )
                 print("🎤", end="", flush=True)
-            elif udp_port == OPV_CONTROL_UDP_PORT:
+            elif udp_port == OPVP.OPV_CONTROL_UDP_PORT:
                 self.stats["control_frames"] += 1
-                self.process_UDP(payload[OpulentVoiceProtocol.ip_v4_header_bytes :])
-                payload = payload[
-                    OpulentVoiceProtocol.ip_v4_header_bytes
-                    + OpulentVoiceProtocol.udp_header_bytes :
-                ]
+                self.process_UDP(payload[OPVP.ip_v4_header_bytes :])
+                payload = payload[OPVP.ip_v4_header_bytes + OPVP.udp_header_bytes :]
                 message = payload.decode("utf-8", errors="ignore")
                 if message == "PTT_START":
-                    self.ptt_active = True
-                    print(replace_colons(f":microphone: PTT START from {sender_addr[0]}"))
+                    print(replace_colons(f":microphone: PTT START from {sender_id}"))
                 elif message == "PTT_STOP":
-                    self.ptt_active = False
-                    print(replace_colons(f"\n:mute: PTT STOP from {sender_addr[0]}"))
+                    print(replace_colons(f"\n:mute: PTT STOP from {sender_id}"))
                 else:
                     print(replace_colons(":clipboard:") + f" Control: {message}")
-            elif udp_port == OPV_TEXT_UDP_PORT:
-                self.process_UDP(payload[OpulentVoiceProtocol.ip_v4_header_bytes :])
-                payload = payload[
-                    OpulentVoiceProtocol.ip_v4_header_bytes
-                    + OpulentVoiceProtocol.udp_header_bytes :
-                ]
+            elif udp_port == OPVP.OPV_TEXT_UDP_PORT:
+                self.process_UDP(payload[OPVP.ip_v4_header_bytes :])
+                payload = payload[OPVP.ip_v4_header_bytes + OPVP.udp_header_bytes :]
                 text_message = payload.decode("utf-8", errors="ignore")
                 print(
-                    decode_callsign(parsed_frame["station_id"])
+                    decode_callsign(sender_id)
                     + replace_colons(f":speech_balloon: {text_message}")
                 )
             else:
-                print(replace_colons(f":question: Unknown UDP destination port: {udp_port}"))
+                print(
+                    replace_colons(
+                        f":question: Unknown UDP destination port: {udp_port}"
+                    )
+                )
 
     def listen_loop(self):
         """Main listening loop"""
@@ -408,7 +437,6 @@ class OpulentVoiceReceiver:
         print(f"   OPUS decoded: {audio_stats['frames_decoded']}")
         print(f"   Audio played: {audio_stats['frames_played']}")
         print(f"   Decode errors: {audio_stats['decode_errors']}")
-        print(f"   PTT status: {'ACTIVE' if self.ptt_active else 'INACTIVE'}")
         if self.last_audio_time > 0:
             time_since_audio = time.time() - self.last_audio_time
             print(f"   Last audio: {time_since_audio:.1f}s ago")
@@ -437,11 +465,9 @@ if __name__ == "__main__":
     print("=" * 50)
     print(replace_colons(":studio_microphone: Opulent Voice Receiver"))
     print("=" * 50)
-    # Configuration
-    LISTEN_PORT = OPV_ENCAP_UDP_PORT
     print(
         replace_colons(
-            f":satellite_antenna: Will listen on port {LISTEN_PORT} for UDP-encapsulated Opulent Voice frames"
+            f":satellite_antenna: Will listen on port {OPVP.OPV_ENCAP_UDP_PORT} for UDP-encapsulated Opulent Voice frames"
         )
     )
     print(
@@ -449,7 +475,7 @@ if __name__ == "__main__":
     )
     try:
         # Create and start receiver
-        receiver = OpulentVoiceReceiver(listen_port=LISTEN_PORT)
+        receiver = OpulentVoiceReceiver(listen_port=OPVP.OPV_ENCAP_UDP_PORT)
         receiver.start()
         print(
             replace_colons(
