@@ -15,6 +15,24 @@ Might need this to run:
 export DYLD_LIBRARY_PATH=/opt/homebrew/opt/opus/lib:$DYLD_LIBRARY_PATH
 ```
 
+### Install Dependencies and Run
+
+On macOS,
+```
+brew install portaudio
+pip3 install opuslib pyaudio cobs emoji_data_python scapy
+python3 opulent_voice_receiver.py
+```
+Or, using UV,
+```
+brew install portaudio
+uv init
+uv venv
+source .venv/bin/activate
+uv pip install opuslib pyaudio cobs emoji_data_python scapy
+uv run opulent_voice_receiver.py
+```
+
 ### Summary of Major Classes
 
 #### class OpulentVoiceProtocol (aka OPV)
