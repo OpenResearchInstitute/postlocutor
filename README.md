@@ -39,6 +39,11 @@ sudo apt install libopus-dev opus-tools python3-pyaudio portaudio19-dev
 pip3 install opuslib pyaudio cobs emoji_data_python scapy sounddevice
 ```
 
+On Windows 11, you might have to build `opus.dll` from source (downloaded from [opus-codec.org](https://opus-codec.org/downloads/)) and place it in `C:\Windows\System32`. You'll need [cmake](https://cmake.org/download/) and a C compiler; the free "community" version of [Microsoft Visual Studio](https://visualstudio.microsoft.com/downloads/) is good enough.
+```
+pip3 install opuslib pyaudio cobs emoji_data_python scapy sounddevice
+```
+
 ### Summary of Major Classes
 
 #### class OpulentVoiceProtocol (aka OPV)

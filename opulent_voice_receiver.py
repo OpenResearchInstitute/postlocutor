@@ -5,8 +5,11 @@ Receives and plays audio and chat from Interlocutor
 Opulent Voice frames received over network encapsulated in UDP.
 
 Status:
-    Tested on macOS and Raspberry Pi OS bookworm;
-    might work on other Linux systems, Windows.
+    Tested on:
+        macOS 15.5 Sequoia
+        Raspberry Pi OS bookworm
+        Windows 11 Pro 24H2
+    Likely to work on similar systems.
     Compatible with current Interlocutor builds
 Usage:
     python3 opulent_voice_receiver.py
@@ -14,7 +17,7 @@ Usage:
 
 import queue
 import socket
-import sounddevice  # not used on macOS, suppresses errors on Raspberry Pi OS
+import sounddevice  # not used on macOS or Windows, suppresses errors on Raspberry Pi OS
 import struct
 import threading
 import time
