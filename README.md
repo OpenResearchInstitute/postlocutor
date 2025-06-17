@@ -33,6 +33,12 @@ uv pip install opuslib pyaudio cobs emoji_data_python scapy
 uv run opulent_voice_receiver.py
 ```
 
+On Raspberry Pi OS (bookworm),
+```
+sudo apt install libopus-dev opus-tools python3-pyaudio portaudio19-dev
+pip3 install opuslib pyaudio cobs emoji_data_python scapy sounddevice
+```
+
 ### Summary of Major Classes
 
 #### class OpulentVoiceProtocol (aka OPV)
