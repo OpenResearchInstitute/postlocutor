@@ -15,6 +15,7 @@ Usage:
     python3 opulent_voice_receiver.py
 """
 
+import errno
 import queue
 import socket
 import sounddevice  # not used on macOS or Windows, suppresses errors on Raspberry Pi OS
@@ -141,6 +142,9 @@ class AudioPlayer:
 
     def audio_callback(self, in_data, frame_count, time_info, status):
         """Audio output callback"""
+        if status:
+            print(f"Audio playback status: {status}")
+
         try:
             # Get decoded audio from queue
             if not self.audio_queue.empty():
@@ -530,6 +534,15 @@ if __name__ == "__main__":
         receiver.print_status()
         print(replace_colons("\n:wave: Thanks for using Opulent Voice Receiver!"))
     except Exception as e:
-        print(f"✗ Error: {e}")
+        if e.errno == errno.EADDRINUSE:  # Address already in use
+            print(
+                replace_colons(
+                    ":warning: Port already in use! Please stop any other Opulent Voice receivers."
+                )
+            )
+        else:
+            print(f"✗ Error: {e}")
+            print(traceback.format_exc())
     finally:
-        receiver.stop()
+        if "receiver" in locals() and receiver.running:
+            receiver.stop()
