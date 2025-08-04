@@ -2,7 +2,7 @@
 """
 Opulent Voice Receiver "Postlocutor"
 Receives and plays audio and chat from Interlocutor
-Opulent Voice frames received over network encapsulated in UDP.
+Opulent Voice frames received over network encapsulated in UDP or TCP.
 
 Status:
     Tested on:
@@ -17,6 +17,7 @@ Usage:
 
 import errno
 import queue
+import select
 import socket
 import sounddevice  # not used on macOS or Windows, suppresses errors on Raspberry Pi OS
 import struct
@@ -48,6 +49,10 @@ class OpulentVoiceProtocol:
     OPV_VOICE_UDP_PORT = 57373  # Opulent Voice Opus voice port
     OPV_TEXT_UDP_PORT = 57374  # Opulent Voice text port
     OPV_CONTROL_UDP_PORT = 57375  # Opulent Voice control port (AAAAA, etc.)
+
+    # Known IP/TCP ports for Opulent Voice
+    OPV_ENCAP_TCP_PORT = 57372  # Opulent Voice encapsulation port (not OTA)
+
 
     opus_frame_size_bytes = (
         80  # bytes in an encoded 40ms Opus frame (including a TOC byte)
@@ -200,12 +205,20 @@ class AudioPlayer:
 
 
 class OpulentVoiceReceiver:
-    """Main receiver class"""
+    """Main receiver class
+    
+    Listens in parallel for TCP- and UDP-encapsulated Opulent Voice frames,
+    decodes them, and plays audio or displays text messages.
+    """
 
-    def __init__(self, listen_ip="0.0.0.0", listen_port=OPVP.OPV_ENCAP_UDP_PORT):
+    def __init__(self, listen_ip="0.0.0.0", listen_udp_port=OPVP.OPV_ENCAP_UDP_PORT, listen_tcp_port=OPVP.OPV_ENCAP_TCP_PORT):
         self.listen_ip = listen_ip
-        self.listen_port = listen_port
-        self.socket = None
+        self.listen_udp_port = listen_udp_port
+        self.listen_tcp_port = listen_tcp_port
+        self.udp_socket = None
+        self.tcp_listen_socket = None
+        self.tcp_recv_socket = None
+        self.tcp_connected = False
         self.running = False
         # Components
         self.protocol = OpulentVoiceProtocol()
@@ -222,27 +235,42 @@ class OpulentVoiceReceiver:
             "empty_encaps": 0,  # empty encapsulated frames
             "padded_frames": 0,
             "padding_bytes": 0,
+            "tcp_connections": 0,  # TCP connections accepted
+            "tcp_rejections": 0,  # TCP connections rejected
+            "udp_discards": 0,  # UDP packets discarded due to TCP connection
         }
         # PTT state tracking
         self.audio_rx_active = False
         self.last_speaker_id = None
         self.last_audio_time = 0
-        self.setup_socket()
+        self.setup_udp_socket()
+        self.setup_tcp_socket()
         self.last_rtp_seq = None
         self.last_rtp_timestamp = None
         self.last_rtp_ssrc = None
         self.cobs_reassembly_buffer = b""
+        self.encap_reassembly_buffer = b""
         self.keepalive_state = 1
 
-    def setup_socket(self):
+    def setup_udp_socket(self):
         """Setup UDP listening socket"""
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.bind((self.listen_ip, self.listen_port))
-            # print(replace_colons(f":globe_with_meridians: Listening on {self.listen_ip}:{self.listen_port}"))
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.udp_socket.bind((self.listen_ip, self.listen_udp_port))
+            # print(replace_colons(f":globe_with_meridians: Listening on {self.listen_ip}:{self.listen_udp_port}"))
         except Exception as e:
-            print(f"✗ Socket setup error: {e}")
+            print(f"✗ UDP Socket setup error: {e}")
+            raise
+    
+    def setup_tcp_socket(self):
+        """Setup TCP listening socket"""
+        try:
+            self.tcp_listen_socket = socket.create_server((self.listen_ip, self.listen_tcp_port), reuse_port=False)
+            self.tcp_listen_socket.settimeout(1.0)  # Set a timeout for select
+            # print(replace_colons(f":globe_with_meridians: Listening for TCP on {self.listen_ip}:{self.listen_tcp_port}"))
+        except Exception as e:
+            print(f"✗ TCP Socket setup error: {e}")
             raise
 
     def process_RTP(self, rtp_header):
@@ -315,7 +343,6 @@ class OpulentVoiceReceiver:
     def cobs_process_bytes(self, parsed_frame):
         """Process COBS-encoded bytes found in received frame"""
         payload = parsed_frame["payload"]
-
         # Bytes from multiple COBS packets may be in the payload, process them all.
         # Frame may also contain runs of b"\00" as padding; skip those.
         while len(payload) > 0:
@@ -350,7 +377,6 @@ class OpulentVoiceReceiver:
         # print(f"Packet from {decode_callsign(sender_id)}")
         # print(f"encoded: {encoded_payload.hex()}")
         decoded_payload = cobs.decode(encoded_payload)  # decode COBS packet
-        # print(f"payload: {decoded_payload.hex()}")
 
         # entering the world of Scapy in the received packet
         pkt = IP(decoded_payload)
@@ -394,7 +420,7 @@ class OpulentVoiceReceiver:
 
                 # Decode and play audio
                 self.audio_player.decode_and_queue_audio(
-                    bytes(pkt[UDP].payload)[OPVP.rtp_header_bytes :] + b"\x00"
+                    bytes(pkt[UDP].payload)[OPVP.rtp_header_bytes :] # !!! don't add this anymore + b"\x00"
                 )
                 # print("🎤", end="", flush=True)
             else:
@@ -443,33 +469,137 @@ class OpulentVoiceReceiver:
                         )
                     )
 
-    def listen_loop(self):
-        """Main listening loop"""
-        print(replace_colons(":ear: Listening for Opulent Voice packets..."))
+    # def listen_loop(self):
+    #     """Main listening loop"""
+    #     print(replace_colons(":ear: Listening for Opulent Voice packets..."))
+    #     while self.running:
+    #         try:
+    #             # Receive packet
+    #             data, sender_addr = self.udp_socket.recvfrom(4096)
+    #             if not data:
+    #                 self.stats["empty_encaps"] += 1
+    #                 continue  # Skip empty packets
+    #             self.stats["packets_received"] += 1
+    #             self.stats["bytes_received"] += len(data)
+    #             # Process frame
+    #             self.process_frame(data, sender_addr)
+    #         except socket.timeout:
+    #             continue
+    #         except Exception as e:
+    #             if self.running:  # Only print error if we're supposed to be running
+    #                 print(f"✗ Receive error: {e}")
+    #                 print(traceback.format_exc())
+    
+    def listen_loop_both(self):
+        """Main listening loop for both UDP and TCP
+
+        Runs in a separate thread.
+        Listens for TCP connections and spawns a new thread for each connection.
+        Listens for UDP packets and processes them.
+        """
+        print(replace_colons(":ear: Listening for Opulent Voice packets on UDP and TCP..."))
         while self.running:
             try:
-                # Receive packet
-                data, sender_addr = self.socket.recvfrom(4096)
-                if not data:
-                    self.stats["empty_encaps"] += 1
-                    continue  # Skip empty packets
-                self.stats["packets_received"] += 1
-                self.stats["bytes_received"] += len(data)
-                # Process frame
-                self.process_frame(data, sender_addr)
+                (rx_ready, tx_ready, error) = select.select([self.udp_socket, self.tcp_listen_socket], [], [], 1.0)
+                for sock in rx_ready:
+                    if sock is self.udp_socket:
+                        data, sender_addr = self.udp_socket.recvfrom(4096)
+                        if not data:
+                            self.stats["empty_encaps"] += 1
+                            continue
+                        self.stats["packets_received"] += 1
+                        if self.tcp_connected:
+                            self.stats["udp_discards"] += 1
+                        else:
+                            self.stats["bytes_received"] += len(data)
+                            # Process frame
+                            self.process_frame(data, sender_addr)
+                    elif sock is self.tcp_listen_socket:
+                        # Accept new TCP connection
+                        self.tcp_recv_socket, addr = self.tcp_listen_socket.accept()
+                        print(
+                            replace_colons(
+                                f":globe_with_meridians: New TCP connection from {addr}"
+                            )
+                        )
+                        # Start a new thread to handle this connection
+                        threading.Thread(target=self.handle_tcp_connection, args=(self.tcp_recv_socket,addr)).start()
             except socket.timeout:
                 continue
             except Exception as e:
                 if self.running:  # Only print error if we're supposed to be running
-                    print(f"✗ Receive error: {e}")
+                    print(f"✗ Select/receive error: {e}")
                     print(traceback.format_exc())
+
+    def handle_tcp_connection(self, conn, from_addr):
+        """Handle incoming TCP connection"""
+        if self.tcp_connected:
+            print(replace_colons(":warning: Already connected to a TCP client, ignoring new connection."))
+            conn.close()
+            self.stats ["tcp_rejections"] += 1
+            return
+        self.tcp_connected = True
+        self.stats["tcp_connections"] += 1
+        print(replace_colons(":computer: Handling TCP connection..."))
+        try:
+            while self.running:
+                data = conn.recv(4096)
+                if not data:
+                    break  # Connection closed
+                self.stats["packets_received"] += 1
+                self.stats["bytes_received"] += len(data)
+                # Process frame
+                self.reassemble_encap(data, from_addr)
+        except Exception as e:
+            print(f"✗ TCP connection error: {e}")
+            self.running = False
+        finally:
+            conn.close()
+            self.tcp_connected = False
+            print(replace_colons(":computer: TCP connection closed"))
+
+    def reassemble_encap(self, tcp_payload, from_addr):
+        """Split/recombine encapsulated frames from TCP payload"""
+        payload = tcp_payload
+
+        # Bytes from multiple COBS packets may be in the payload, process them all.
+        # Frame may also contain runs of b"\00" as padding; skip those.
+        while len(payload) > 0:
+            zero_index = payload.find(b"\x00")  # zero indicates end of COBS packet
+            if zero_index >= 0:
+                # Found a zero byte, this completes a COBS packet
+                self.encap_reassembly_buffer += payload[
+                    :zero_index
+                ]  # do not include the zero byte
+
+                # Process the complete COBS packet
+                decoded_payload = cobs.decode(self.encap_reassembly_buffer)  # decode COBS packet
+
+                self.process_frame(decoded_payload, from_addr)
+
+                self.encap_reassembly_buffer = b""
+                payload = payload[
+                    zero_index + 1 :
+                ]  # go to next chunk, skipping the zero byte; may be empty
+                if len(payload) > 0 and payload[0] == 0:  # this frame contains padding
+                    self.stats["padded_frames"] += 1
+                while (
+                    len(payload) > 0 and payload[0] == 0
+                ):  # extra padding bytes are to be ignored
+                    payload = payload[1:]
+                    self.stats["padding_bytes"] += 1
+            else:
+                self.encap_reassembly_buffer += (
+                    payload  # accumulate data for COBS packet
+                )
+                payload = b""
+
 
     def print_status(self):
         """Print current status"""
         now = datetime.now().strftime("%H:%M:%S")
         audio_stats = self.audio_player.get_stats()
         print(replace_colons(f"\n:bar_chart: Status at {now}:"))
-        print(f"   Packets received: {self.stats['packets_received']}")
         print(f"   Valid frames: {self.stats['valid_frames']}")
         print(f"   Audio frames: {self.stats['audio_frames']}")
         print(f"   Text messages: {self.stats['text_messages']}")
@@ -480,6 +610,10 @@ class OpulentVoiceReceiver:
         print(f"   Empty encapsulated frames: {self.stats['empty_encaps']}")
         print(f"   Frames with padding bytes: {self.stats['padded_frames']}")
         print(f"   Padding bytes between COBS packets: {self.stats['padding_bytes']}")
+        print(f"   TCP connections: {self.stats['tcp_connections']}")
+        print(f"   TCP rejections: {self.stats['tcp_rejections']}")
+        print(f"   UDP packets received: {self.stats['packets_received']}")
+        print(f"   UDP packets discarded due to TCP connection: {self.stats['udp_discards']}")
         if self.last_audio_time > 0:
             time_since_audio = time.time() - self.last_audio_time
             print(f"   Last audio: {time_since_audio:.1f}s ago")
@@ -489,7 +623,7 @@ class OpulentVoiceReceiver:
         self.running = True
         self.audio_player.start()
         # Start listening in a separate thread
-        self.listen_thread = threading.Thread(target=self.listen_loop)
+        self.listen_thread = threading.Thread(target=self.listen_loop_both)
         self.listen_thread.daemon = True
         self.listen_thread.start()
         print(replace_colons(":rocket: Opulent Voice Receiver started"))
@@ -498,8 +632,8 @@ class OpulentVoiceReceiver:
         """Stop the receiver"""
         self.running = False
         self.audio_player.stop()
-        if self.socket:
-            self.socket.close()
+        if self.udp_socket:
+            self.udp_socket.close()
         print(replace_colons(":octagonal_sign: Receiver stopped"))
 
 
@@ -518,7 +652,7 @@ if __name__ == "__main__":
     )
     try:
         # Create and start receiver
-        receiver = OpulentVoiceReceiver(listen_port=OPVP.OPV_ENCAP_UDP_PORT)
+        receiver = OpulentVoiceReceiver(listen_udp_port=OPVP.OPV_ENCAP_UDP_PORT, listen_tcp_port=OPVP.OPV_ENCAP_TCP_PORT)
         receiver.start()
         print(
             replace_colons(
