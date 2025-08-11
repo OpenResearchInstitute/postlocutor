@@ -469,28 +469,8 @@ class OpulentVoiceReceiver:
                         )
                     )
 
-    # def listen_loop(self):
-    #     """Main listening loop"""
-    #     print(replace_colons(":ear: Listening for Opulent Voice packets..."))
-    #     while self.running:
-    #         try:
-    #             # Receive packet
-    #             data, sender_addr = self.udp_socket.recvfrom(4096)
-    #             if not data:
-    #                 self.stats["empty_encaps"] += 1
-    #                 continue  # Skip empty packets
-    #             self.stats["packets_received"] += 1
-    #             self.stats["bytes_received"] += len(data)
-    #             # Process frame
-    #             self.process_frame(data, sender_addr)
-    #         except socket.timeout:
-    #             continue
-    #         except Exception as e:
-    #             if self.running:  # Only print error if we're supposed to be running
-    #                 print(f"✗ Receive error: {e}")
-    #                 print(traceback.format_exc())
-    
-    def listen_loop_both(self):
+
+    def listen_loop(self):
         """Main listening loop for both UDP and TCP
 
         Runs in a separate thread.
@@ -623,7 +603,7 @@ class OpulentVoiceReceiver:
         self.running = True
         self.audio_player.start()
         # Start listening in a separate thread
-        self.listen_thread = threading.Thread(target=self.listen_loop_both)
+        self.listen_thread = threading.Thread(target=self.listen_loop)
         self.listen_thread.daemon = True
         self.listen_thread.start()
         print(replace_colons(":rocket: Opulent Voice Receiver started"))
